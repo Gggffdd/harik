@@ -233,4 +233,290 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if new_achievements:
             await message.reply_text(
                 f"🏆 <b>Новое достижение!</b>\n"
-                f"Вы получили: {', '.join(new_achievements)}
+                f"Вы получили: {', '.join(new_achievements)}",
+                parse_mode=ParseMode.HTML
+            )
+        
+        # Уведомление админу
+        admin_text = (
+            f"🚨 <b>НОВЫЙ РЕПОРТ #{report_id}</b>\n\n"
+            f"<b>От:</b> @{reporter.username or reporter.first_name}\n"
+            f"<b>На:</b> @{reported.username or reported.first_name}\n"
+            f"<b>Причина:</b> {reason}\n"
+            f"<b>Сообщение:</b> {reported_msg.text[:100]}...\n"
+            f"<b>Чат:</b> {message.chat.title or 'личка'}"
+        )
+        
+        # Кнопка перехода к сообщению
+        if message.chat.username:
+            link = f"https://t.me/{message.chat.username}/{reported_msg.message_id}"
+        else:
+            chat_id = str(message.chat_id)[4:] if str(message.chat_id).startswith('-100') else str(message.chat_id)
+            link = f"https://t.me/c/{chat_id}/{reported_msg.message_id}"
+        
+        keyboard = [[InlineKeyboardButton("🔍 Перейти к сообщению", url=link)]]
+        
+        await context.bot.send_message(
+            chat_id=config.ADMIN_ID,
+            text=admin_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        
+        await message.reply_text(
+            "✅ <b>Репорт отправлен администратору!</b>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        db.update_last_active(reporter.id)
+        
+    except Exception as e:
+        logger.error(f"Ошибка в report: {e}", exc_info=True)
+
+async def reputation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик +реп / -реп"""
+    try:
+        if not update.message or not update.message.reply_to_message:
+            return
+        
+        text = update.message.text.lower()
+        
+        if "+реп" not in text and "-реп" not in text:
+            return
+        
+        giver = update.effective_user
+        receiver = update.message.reply_to_message.from_user
+        
+        if giver.id == receiver.id:
+            await update.message.reply_text(
+                "⚠️ <b>Нельзя менять репутацию самому себе!</b>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Проверяем кулдаун (в реальном проекте - в БД)
+        
+        value = 1 if "+реп" in text else -1
+        
+        # Добавляем репутацию
+        db.add_reputation(giver.id, receiver.id, value)
+        
+        # Добавляем связь
+        db.add_connection(giver.id, receiver.id)
+        
+        # Проверяем достижения
+        new_achievements = db.check_achievements(receiver.id)
+        
+        rep_total = db.get_reputation(receiver.id)
+        balloon_emoji = get_emoji_for_user(receiver.id)
+        
+        await update.message.reply_text(
+            f"{balloon_emoji} "
+            f"<b>Репутация @{receiver.username or receiver.first_name} изменена!</b>\n\n"
+            f"<b>Текущая репутация:</b> {rep_total}",
+            parse_mode=ParseMode.HTML
+        )
+        
+        if new_achievements:
+            await update.message.reply_text(
+                f"🏆 @{receiver.username or receiver.first_name} получил достижение: {', '.join(new_achievements)}!",
+                parse_mode=ParseMode.HTML
+            )
+        
+        db.update_last_active(giver.id)
+        db.update_last_active(receiver.id)
+        
+    except Exception as e:
+        logger.error(f"Ошибка в reputation: {e}", exc_info=True)
+
+# ===== АДМИН-КОМАНДЫ =====
+
+@admin_only
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /адм - панель администратора"""
+    try:
+        keyboard = [
+            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton("🚨 Репорты", callback_data="admin_reports")],
+            [InlineKeyboardButton("🎈 Управление шарами", callback_data="admin_balloons")],
+            [InlineKeyboardButton("📋 Топ пользователей", callback_data="admin_top")],
+            [InlineKeyboardButton("⚙️ Настройки", callback_data="admin_settings")]
+        ]
+        
+        await update.message.reply_text(
+            "👑 <b>Панель администратора</b>\n\n"
+            "Выберите действие:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin: {e}", exc_info=True)
+
+@admin_only
+async def balloon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Управление шарами"""
+    try:
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "🎈 <b>Управление шарами</b>\n\n"
+                "Команды:\n"
+                "/шар создать @user - создать шар\n"
+                "/шар поднять @user - повысить\n"
+                "/шар опустить @user - понизить\n"
+                "/шар цвет @user #FF0000 - сменить цвет\n"
+                "/шар имя @user Название - дать имя\n"
+                "/шар лопнуть @user - забанить\n"
+                "/шар типы - список типов",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        subcmd = args[0].lower()
+        
+        if subcmd == "типы":
+            from config import BALLOON_TYPES
+            text = "🎈 <b>Типы шаров:</b>\n\n"
+            for key, data in BALLOON_TYPES.items():
+                text += f"• {data['name']}: {data['min_rep']}-{data['max_rep']} реп\n"
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+            
+        elif subcmd == "создать" and len(args) >= 2:
+            username = args[1].lstrip('@')
+            # Поиск пользователя
+            all_users = db.get_all_users()
+            for u in all_users:
+                if u['username'].lower() == username.lower():
+                    await update.message.reply_text(
+                        f"✅ Шар для @{username} уже существует!",
+                        parse_mode=ParseMode.HTML
+                    )
+                    return
+            
+            await update.message.reply_text(
+                f"❌ Пользователь @{username} не найден в БД.\n"
+                f"Попросите его написать /start",
+                parse_mode=ParseMode.HTML
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка в balloon: {e}", exc_info=True)
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопок админ-панели"""
+    try:
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "admin_stats":
+            stats = db.get_stats()
+            
+            text = (
+                f"📊 <b>Статистика</b>\n\n"
+                f"👥 Всего пользователей: {stats['total_users']}\n"
+                f"📅 Активных сегодня: {stats['active_today']}\n"
+                f"🚨 Всего репортов: {stats['total_reports']}\n"
+                f"⭐ Средняя репутация: {stats['avg_rep']}\n\n"
+                f"<b>Типы шаров:</b>\n"
+            )
+            
+            for type_name, count in stats['balloon_stats'].items():
+                text += f"• {type_name}: {count}\n"
+            
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+            
+        elif query.data == "admin_reports":
+            reports = db.get_reports(limit=5)
+            
+            if not reports:
+                await query.edit_message_text(
+                    "✅ Нет активных репортов",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            text = "🚨 <b>Последние репорты:</b>\n\n"
+            for r in reports:
+                text += f"#{r['id']}: @{r['reporter_id']} на @{r['reported_id']} - {r['reason'][:50]}\n"
+            
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+            
+        elif query.data == "admin_top":
+            top_users = db.get_top_users(10)
+            
+            text = "🏆 <b>Топ пользователей</b>\n\n"
+            for i, u in enumerate(top_users, 1):
+                rep = u['rep_positive'] - u['rep_negative']
+                text += f"{i}. @{u['username']} - {rep} реп\n"
+            
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+            
+    except Exception as e:
+        logger.error(f"Ошибка в admin_callback: {e}", exc_info=True)
+
+# ===== ОСНОВНОЙ ОБРАБОТЧИК =====
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик всех сообщений"""
+    try:
+        if not update.message or not update.message.text:
+            return
+        
+        text = update.message.text.strip()
+        
+        # Проверяем репутацию (ответы)
+        if update.message.reply_to_message:
+            if "+реп" in text.lower() or "-реп" in text.lower():
+                await reputation_handler(update, context)
+                return
+        
+        # Проверяем команды
+        cmd = text.lower()
+        
+        if cmd in ["и", "/и"]:
+            context.args = []
+            await profile_command(update, context)
+        elif cmd in ["адм", "/адм"]:
+            await admin_command(update, context)
+        elif cmd.startswith(("репорт", "/репорт")):
+            parts = text.split()
+            context.args = parts[1:] if len(parts) > 1 else []
+            await report_command(update, context)
+        elif cmd.startswith(("шар", "/шар")):
+            parts = text.split()
+            context.args = parts[1:] if len(parts) > 1 else []
+            await balloon_command(update, context)
+        
+    except Exception as e:
+        logger.error(f"Ошибка в handle_message: {e}", exc_info=True)
+
+# ===== ЗАПУСК =====
+
+def main():
+    """Запуск бота"""
+    try:
+        print("🎈 Запуск AirRep...")
+        
+        app = Application.builder().token(config.BOT_TOKEN).build()
+        
+        # Добавляем обработчики
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        app.add_handler(CallbackQueryHandler(admin_callback))
+        
+        # Обработка сигналов
+        signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        
+        print("✅ Бот запущен!")
+        print("📝 Команды: и, адм, репорт, +реп/-реп")
+        
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+
+if __name__ == "__main__":
+    main()
