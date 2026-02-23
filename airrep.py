@@ -51,7 +51,7 @@ class Config:
     
     # GitHub Pages (измените на свои)
     GITHUB_USERNAME = "Gggffdd"
-    REPO_NAME = "airrep"
+    REPO_NAME = "harik"
     
     # URL для WebApp
     WEBAPP_URL = f"https://{GITHUB_USERNAME}.github.io/{REPO_NAME}/"
